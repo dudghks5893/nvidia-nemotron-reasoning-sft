@@ -1,0 +1,21 @@
+{
+  "input": "data/final/sft_train_final.csv",
+  "output_dir": "data/final/tokenized_corpus_final",
+  "model_name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "cache_dir": ".cache/huggingface",
+  "max_seq_len": 8192,
+  "num_examples": 9057,
+  "total_tokens": 31582945,
+  "prompt_tokens": 1378584,
+  "unmasked_tokens": 30204361,
+  "truncated_count": 0,
+  "answer_missing_after_truncation_count": 0,
+  "shard_size": 1000,
+  "num_shards": 10,
+  "files": {
+    "token_stats": "token_stats.csv",
+    "pattern_token_stats": "pattern_token_stats.csv",
+    "meta": "meta.json",
+    "shards": "train_*.pt"
+  }
+}

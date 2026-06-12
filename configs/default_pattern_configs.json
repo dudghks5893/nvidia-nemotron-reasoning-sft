@@ -1,0 +1,25 @@
+{
+  "cipher": [
+    {"mode": "correct", "n": 200, "group_by_rule": true}
+  ],
+  "formula_based": [
+    {"mode": "wrong", "n": 600, "group_by_rule": false}
+  ],
+  "roman_numeral": [
+    {"mode": "correct", "n": 500, "group_by_rule": false}
+  ],
+  "unit_conversion": [
+    {"mode": "wrong", "n": 500, "group_by_rule": false}
+  ],
+  "bit_manipulation": [
+    {"mode": "correct", "n": 750, "group_by_rule": false},
+    {"mode": "wrong", "n": null, "group_by_rule": false}
+  ],
+  "numeric_symbol": [
+    {"mode": "correct", "n": null, "group_by_rule": false},
+    {"mode": "wrong", "n": null, "group_by_rule": false}
+  ],
+  "pure_symbol": [
+    {"mode": "correct", "n": null, "group_by_rule": false}
+  ]
+}
