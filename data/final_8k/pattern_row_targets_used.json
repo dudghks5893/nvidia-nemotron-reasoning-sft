@@ -1,0 +1,9 @@
+{
+  "bit_manipulation": 1150,
+  "formula_based": 1400,
+  "unit_conversion": 1400,
+  "cipher": 1400,
+  "roman_numeral": 1400,
+  "numeric_symbol": 550,
+  "pure_symbol": 700
+}

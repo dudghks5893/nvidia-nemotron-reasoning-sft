@@ -1,0 +1,9 @@
+{
+  "bit_manipulation": 0.29478511795722123,
+  "formula_based": 0.19935016364799427,
+  "cipher": 0.18436232345361114,
+  "unit_conversion": 0.134201339066656,
+  "numeric_symbol": 0.11898996925114948,
+  "roman_numeral": 0.04425707400183221,
+  "pure_symbol": 0.02405401262153566
+}
