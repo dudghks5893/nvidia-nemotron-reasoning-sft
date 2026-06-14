@@ -1,21 +1,8 @@
 #!/usr/bin/env python3
-# scripts/build_tokenized_corpus.py
+"""Build pre-tokenized corpus shards for Kaggle training.
 
-"""
-Build pre-tokenized corpus shards for Kaggle training.
-
-This script does NOT train a model.
-
-It only does:
-    SFT CSV
-    -> tokenizer.apply_chat_template
-    -> input_ids / attention_mask / labels
-    -> .pt shard files
-    -> token_stats.csv
-    -> meta.json
-
-The generated corpus can later be uploaded to a Kaggle Dataset and used
-by a Kaggle GPU training notebook/script.
+This script keeps assistant-only labels by masking the prompt prefix tokens with -100.
+It saves .pt shards plus meta.json.
 """
 
 from __future__ import annotations
@@ -27,257 +14,147 @@ from pathlib import Path
 import pandas as pd
 import torch
 from tqdm import tqdm
-
-from nemotron_repro.tokenizer_utils import (
-    load_messages,
-    load_model_config,
-    load_tokenizer,
-    tokenize_messages_assistant_only,
-)
+from transformers import AutoTokenizer
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--input",
-        required=True,
-        help="Input SFT CSV. Usually data/generated/sft_train.csv or selected/budgeted CSV.",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        required=True,
-        help="Output directory for tokenized corpus shards.",
-    )
-
-    parser.add_argument(
-        "--model-config",
-        default="configs/model_config.json",
-        help="Model/tokenizer config JSON.",
-    )
-
-    parser.add_argument(
-        "--model-name",
-        default=None,
-        help="Optional HF tokenizer name/path. Overrides config.",
-    )
-
-    parser.add_argument(
-        "--cache-dir",
-        default=None,
-        help="Optional HF cache dir. Overrides config.",
-    )
-
-    parser.add_argument(
-        "--max-seq-len",
-        type=int,
-        default=None,
-        help="Max sequence length. If omitted, uses model_config.json.",
-    )
-
-    parser.add_argument(
-        "--shard-size",
-        type=int,
-        default=1000,
-        help="Number of examples per .pt shard.",
-    )
-
-    parser.add_argument(
-        "--limit",
-        type=int,
-        default=None,
-        help="Optional debug row limit.",
-    )
-
-    return parser.parse_args()
+def load_messages(value):
+    if isinstance(value, list):
+        return value
+    try:
+        return json.loads(value)
+    except Exception as e:
+        raise ValueError(f"Could not parse messages JSON: {str(value)[:200]}") from e
 
 
-def save_shard(records, out_dir: Path, shard_idx: int) -> Path:
-    shard_path = out_dir / f"train_{shard_idx:05d}.pt"
-    torch.save(records, shard_path)
-    return shard_path
+def fallback_format_messages(messages, include_assistant=True):
+    chunks = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        if role == "user":
+            chunks.append(f"<|user|>\n{msg.get('content','')}\n")
+        elif role == "assistant" and include_assistant:
+            reasoning = msg.get("reasoning_content", "")
+            content = msg.get("content", "")
+            if reasoning:
+                chunks.append(f"<|assistant|>\n<think>\n{reasoning}\n</think>\n{content}\n")
+            else:
+                chunks.append(f"<|assistant|>\n{content}\n")
+    return "".join(chunks)
+
+
+def render_chat(tokenizer, messages, include_assistant=True, add_generation_prompt=False):
+    msgs = messages if include_assistant else [m for m in messages if m.get("role") != "assistant"]
+    try:
+        return tokenizer.apply_chat_template(
+            msgs,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+    except Exception:
+        return fallback_format_messages(msgs, include_assistant=include_assistant)
+
+
+def tokenize_one(tokenizer, messages, max_seq_len):
+    # Prefix is user side with assistant generation prompt. Full contains assistant reasoning/content.
+    prefix_text = render_chat(tokenizer, messages, include_assistant=False, add_generation_prompt=True)
+    full_text = render_chat(tokenizer, messages, include_assistant=True, add_generation_prompt=False)
+
+    prefix_ids = tokenizer(prefix_text, add_special_tokens=False)["input_ids"]
+    full_ids = tokenizer(full_text, add_special_tokens=False)["input_ids"]
+
+    if tokenizer.eos_token_id is not None and (len(full_ids) == 0 or full_ids[-1] != tokenizer.eos_token_id):
+        full_ids = full_ids + [tokenizer.eos_token_id]
+
+    truncated = len(full_ids) > max_seq_len
+    full_ids = full_ids[:max_seq_len]
+
+    labels = full_ids.copy()
+    prompt_len = min(len(prefix_ids), len(labels))
+    labels[:prompt_len] = [-100] * prompt_len
+
+    return {
+        "input_ids": full_ids,
+        "attention_mask": [1] * len(full_ids),
+        "labels": labels,
+        "truncated": truncated,
+        "seq_len": len(full_ids),
+        "unmasked_tokens": sum(1 for x in labels if x != -100),
+    }
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--model-name", required=True)
+    parser.add_argument("--max-seq-len", type=int, default=8192)
+    parser.add_argument("--shard-size", type=int, default=1000)
+    args = parser.parse_args()
 
-    input_path = Path(args.input)
     out_dir = Path(args.output_dir)
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input CSV not found: {input_path}")
-
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    config = load_model_config(args.model_config)
-    max_seq_len = args.max_seq_len or int(config.get("max_seq_len", 8192))
-
-    tokenizer = load_tokenizer(
-        model_name=args.model_name,
-        cache_dir=args.cache_dir,
-        config_path=args.model_config,
-    )
-
-    df = pd.read_csv(input_path)
-
-    if args.limit is not None:
-        df = df.head(args.limit).copy()
-
+    df = pd.read_csv(args.input)
     if "messages" not in df.columns:
-        raise ValueError(
-            "Input CSV must contain a 'messages' column. "
-            "Run scripts/prepare_sft_dataset.py first."
-        )
+        raise ValueError("Input CSV must contain a messages column. Run prepare_sft_dataset.py first.")
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
 
     records = []
     stats_rows = []
-
     total_tokens = 0
-    total_unmasked_tokens = 0
-    total_prompt_tokens = 0
+    total_unmasked = 0
     truncated_count = 0
-    answer_missing_after_truncation_count = 0
 
-    shard_idx = 0
-
-    iterator = tqdm(
-        df.iterrows(),
-        total=len(df),
-        desc="Building tokenized corpus",
-    )
-
-    for i, row in iterator:
+    for i, row in tqdm(df.iterrows(), total=len(df)):
         messages = load_messages(row["messages"])
+        item = tokenize_one(tokenizer, messages, max_seq_len=args.max_seq_len)
+        item["id"] = str(row.get("id", i))
+        item["pattern"] = str(row.get("pattern", row.get("type", "")))
+        item["rule_name"] = str(row.get("solver_rule_name", ""))
+        if "loss_weight" in row and pd.notna(row["loss_weight"]):
+            item["loss_weight"] = float(row["loss_weight"])
+        else:
+            item["loss_weight"] = 1.0
 
-        item = tokenize_messages_assistant_only(
-            tokenizer=tokenizer,
-            messages=messages,
-            max_seq_len=max_seq_len,
-            answer=row.get("answer", None),
-        )
-
-        sample_id = str(row.get("id", i))
-        pattern = str(row.get("pattern", row.get("type", "")))
-        rule_name = str(row.get("solver_rule_name", ""))
-
-        loss_weight = row.get("loss_weight", 1.0)
-
-        try:
-            loss_weight = float(loss_weight)
-        except Exception:
-            loss_weight = 1.0
-
-        record = {
-            "input_ids": item["input_ids"],
-            "attention_mask": item["attention_mask"],
-            "labels": item["labels"],
-            "id": sample_id,
-            "pattern": pattern,
-            "rule_name": rule_name,
-            "loss_weight": loss_weight,
-        }
-
-        records.append(record)
-
-        total_tokens += int(item["seq_len"])
-        total_prompt_tokens += int(item["prompt_tokens"])
-        total_unmasked_tokens += int(item["unmasked_tokens"])
+        total_tokens += item["seq_len"]
+        total_unmasked += item["unmasked_tokens"]
         truncated_count += int(item["truncated"])
-
-        answer_in_truncated_tail = item.get("answer_in_truncated_tail")
-
-        if item["truncated"] and answer_in_truncated_tail is False:
-            answer_missing_after_truncation_count += 1
-
-        stats_rows.append(
-            {
-                "id": sample_id,
-                "pattern": pattern,
-                "rule_name": rule_name,
-                "seq_len": int(item["seq_len"]),
-                "original_seq_len": int(item["original_seq_len"]),
-                "prompt_tokens": int(item["prompt_tokens"]),
-                "unmasked_tokens": int(item["unmasked_tokens"]),
-                "truncated": bool(item["truncated"]),
-                "answer_in_truncated_tail": answer_in_truncated_tail,
-                "loss_weight": loss_weight,
-            }
-        )
+        records.append(item)
+        stats_rows.append({
+            "id": item["id"],
+            "pattern": item["pattern"],
+            "rule_name": item["rule_name"],
+            "seq_len": item["seq_len"],
+            "unmasked_tokens": item["unmasked_tokens"],
+            "truncated": item["truncated"],
+            "loss_weight": item["loss_weight"],
+        })
 
         if len(records) >= args.shard_size:
-            save_shard(records, out_dir, shard_idx)
-            shard_idx += 1
+            shard_idx = len(list(out_dir.glob("train_*.pt")))
+            torch.save(records, out_dir / f"train_{shard_idx:05d}.pt")
             records = []
 
     if records:
-        save_shard(records, out_dir, shard_idx)
+        shard_idx = len(list(out_dir.glob("train_*.pt")))
+        torch.save(records, out_dir / f"train_{shard_idx:05d}.pt")
 
     stats_df = pd.DataFrame(stats_rows)
     stats_df.to_csv(out_dir / "token_stats.csv", index=False)
 
-    pattern_stats = (
-        stats_df.groupby("pattern")
-        .agg(
-            row_count=("pattern", "size"),
-            mean_seq_len=("seq_len", "mean"),
-            max_seq_len=("seq_len", "max"),
-            total_seq_len=("seq_len", "sum"),
-            mean_unmasked_tokens=("unmasked_tokens", "mean"),
-            total_unmasked_tokens=("unmasked_tokens", "sum"),
-            truncated_count=("truncated", "sum"),
-        )
-        .reset_index()
-        .sort_values("total_unmasked_tokens", ascending=False)
-    )
-
-    pattern_stats["unmasked_token_share"] = (
-        pattern_stats["total_unmasked_tokens"]
-        / pattern_stats["total_unmasked_tokens"].sum()
-        if pattern_stats["total_unmasked_tokens"].sum() > 0
-        else 0.0
-    )
-
-    pattern_stats.to_csv(out_dir / "pattern_token_stats.csv", index=False)
-
     meta = {
-        "input": str(input_path),
-        "output_dir": str(out_dir),
-        "model_name": args.model_name or config.get("model_name"),
-        "cache_dir": args.cache_dir or config.get("cache_dir"),
-        "max_seq_len": int(max_seq_len),
-        "num_examples": int(len(df)),
+        "input": str(args.input),
+        "model_name": args.model_name,
+        "max_seq_len": args.max_seq_len,
+        "num_examples": len(df),
         "total_tokens": int(total_tokens),
-        "prompt_tokens": int(total_prompt_tokens),
-        "unmasked_tokens": int(total_unmasked_tokens),
+        "unmasked_tokens": int(total_unmasked),
         "truncated_count": int(truncated_count),
-        "answer_missing_after_truncation_count": int(
-            answer_missing_after_truncation_count
-        ),
-        "shard_size": int(args.shard_size),
-        "num_shards": int(len(list(out_dir.glob("train_*.pt")))),
-        "files": {
-            "token_stats": "token_stats.csv",
-            "pattern_token_stats": "pattern_token_stats.csv",
-            "meta": "meta.json",
-            "shards": "train_*.pt",
-        },
+        "shard_size": args.shard_size,
     }
-
-    (out_dir / "meta.json").write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-
-    print("=" * 100)
-    print("[Tokenized corpus meta]")
+    (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(meta, ensure_ascii=False, indent=2))
-
-    print("=" * 100)
-    print("[Pattern token stats]")
-    print(pattern_stats.to_string(index=False))
-
-    print("=" * 100)
     print(f"Saved tokenized corpus: {out_dir}")
 
 

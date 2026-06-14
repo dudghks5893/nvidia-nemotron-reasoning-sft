@@ -1,0 +1,10 @@
+{
+  "input": "data/cipher_highscore_old8k_shape/sft_train_final.csv",
+  "model_name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+  "max_seq_len": 8192,
+  "num_examples": 8046,
+  "total_tokens": 27512780,
+  "unmasked_tokens": 26298901,
+  "truncated_count": 0,
+  "shard_size": 1000
+}

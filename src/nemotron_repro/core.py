@@ -16,10 +16,6 @@ from typing import Dict, List, Literal, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
-# Numeric-symbol expressions have the form: left_digits + one_operator + right_digits.
-# Used by parse_numeric_symbol_expr() and build_numeric_symbol_highscore_reasoning().
-_NUMERIC_EXPR_RE = re.compile(r"^(\d+)(\D)(\d+)$")
-
 
 # ===== Extracted from notebook cell 14: pattern detection =====
 import re
@@ -1068,6 +1064,23 @@ def pattern_matches(pattern, candidate):
             return False
     return True
 
+
+def cipher_word_pattern(word):
+    """
+    High-score reference style word pattern.
+
+    Example:
+        queen -> (0, 1, 2, 2, 3)
+    This is used by the cipher candidate search so that repeated letters in the
+    cipher word and candidate word have the same structural pattern.
+    """
+    seen = {}
+    pattern = []
+    for char in str(word).lower():
+        if char not in seen:
+            seen[char] = len(seen)
+        pattern.append(seen[char])
+    return tuple(pattern)
 def get_vocab_candidates(pattern, vocab):
     """
     '?'가 포함된 decoded pattern에 대해 valid 후보 단어를 만든다.
@@ -1166,220 +1179,80 @@ def format_fixed_position_summary(decoded_pattern):
         return 'none'
     return ', '.join(items)
 
-def check_candidate_mapping_consistency(
-    cipher_word,
-    decoded_pattern,
-    candidate,
-    mapping,
-    check_reverse_mapping=False,
-):
+def check_candidate_mapping_consistency(cipher_word, decoded_pattern, candidate, mapping):
     """
-    candidate word가 현재 mapping과 일관적인지 확인한다.
+    candidate word가 현재 mapping과 양방향으로 일관적인지 확인한다.
 
-    이번 실험 버전의 핵심:
-        - 후보 단어 선택 시 reverse mapping/plain->cipher 충돌은 확인하지 않는다.
-        - 즉, 서로 다른 cipher 문자가 같은 plain 문자로 가는 후보도 허용한다.
-
-    그래도 유지하는 조건:
+    조건:
         1. 길이가 정확히 같아야 한다.
         2. decoded_pattern에서 이미 해독된 글자는 candidate와 같은 위치에서 일치해야 한다.
-        3. '?' 위치의 original cipher character가 이미 mapping에 있으면 현재 mapping과 충돌하지 않아야 한다.
-        4. 같은 unknown cipher character가 같은 단어 안에서 반복되면 같은 plain letter로만 매핑되어야 한다.
-
-    Args:
-        check_reverse_mapping:
-            False가 기본값이다. 고득점자식 후보 선택 실험을 위해 reverse mapping 충돌을 보지 않는다.
-            True로 넘기면 기존 방식처럼 plain letter가 이미 다른 cipher에서 사용 중인지도 확인한다.
+        3. '?' 위치의 original cipher character는 아직 mapping에 없어야 한다.
+        4. 새 plain letter가 이미 다른 cipher character의 output으로 사용 중이면 충돌이다.
+        5. 같은 unknown cipher character가 반복되면 같은 plain letter로만 매핑되어야 한다.
     """
     cipher_word = str(cipher_word).lower()
     decoded_pattern = str(decoded_pattern).lower()
     candidate = str(candidate).lower()
-
     expected_len = len(decoded_pattern)
     candidate_len = len(candidate)
     cipher_len = len(cipher_word)
-
     if candidate_len != expected_len:
-        return {
-            'valid': False,
-            'reason': 'length mismatch',
-            'new_mappings': [],
-            'details': {'expected_len': expected_len, 'candidate_len': candidate_len},
-        }
-
+        return {'valid': False, 'reason': 'length mismatch', 'new_mappings': [], 'details': {'expected_len': expected_len, 'candidate_len': candidate_len}}
     if cipher_len != candidate_len:
-        return {
-            'valid': False,
-            'reason': 'cipher word length mismatch',
-            'new_mappings': [],
-            'details': {'cipher_len': cipher_len, 'candidate_len': candidate_len},
-        }
-
-    fixed_checks, fixed_mismatches = get_fixed_position_checks(
-        decoded_pattern=decoded_pattern,
-        candidate=candidate,
-    )
-
+        return {'valid': False, 'reason': 'cipher word length mismatch', 'new_mappings': [], 'details': {'cipher_len': cipher_len, 'candidate_len': candidate_len}}
+    fixed_checks, fixed_mismatches = get_fixed_position_checks(decoded_pattern=decoded_pattern, candidate=candidate)
     if len(fixed_mismatches) > 0:
-        return {
-            'valid': False,
-            'reason': 'fixed letters mismatch',
-            'new_mappings': [],
-            'details': {
-                'fixed_checks': fixed_checks,
-                'fixed_mismatches': fixed_mismatches,
-                'first_mismatch': fixed_mismatches[0],
-            },
-        }
-
-    reverse_mapping = build_reverse_mapping(mapping) if check_reverse_mapping else {}
+        return {'valid': False, 'reason': 'fixed letters mismatch', 'new_mappings': [], 'details': {'fixed_checks': fixed_checks, 'fixed_mismatches': fixed_mismatches, 'first_mismatch': fixed_mismatches[0]}}
+    reverse_mapping = build_reverse_mapping(mapping)
+    new_mappings = []
     local_new_mapping = {}
-
-    for pos, (cipher_char, decoded_char, candidate_char) in enumerate(
-        zip(cipher_word, decoded_pattern, candidate),
-        start=1,
-    ):
-        # 이미 해독된 자리: fixed check를 이미 통과했으므로 mapping 충돌만 확인한다.
+    for pos, (cipher_char, decoded_char, candidate_char) in enumerate(zip(cipher_word, decoded_pattern, candidate), start=1):
         if decoded_char != '?':
             if cipher_char in mapping and mapping[cipher_char] != candidate_char:
-                return {
-                    'valid': False,
-                    'reason': 'known mapping conflict',
-                    'new_mappings': [],
-                    'details': {
-                        'position': pos,
-                        'cipher_char': cipher_char,
-                        'known_plain': mapping[cipher_char],
-                        'candidate_plain': candidate_char,
-                    },
-                }
+                return {'valid': False, 'reason': 'known mapping conflict', 'new_mappings': [], 'details': {'position': pos, 'cipher_char': cipher_char, 'known_plain': mapping[cipher_char], 'candidate_plain': candidate_char}}
             continue
-
-        # '?' 자리인데 이미 global mapping에 있으면 그 mapping과 맞는지만 본다.
-        # 보통 current_decoded_pattern 생성 시 이런 경우는 '?'가 아니지만, 안전하게 둔다.
         if cipher_char in mapping:
-            if mapping[cipher_char] != candidate_char:
-                return {
-                    'valid': False,
-                    'reason': 'unknown position already has mapping',
-                    'new_mappings': [],
-                    'details': {
-                        'position': pos,
-                        'cipher_char': cipher_char,
-                        'known_plain': mapping[cipher_char],
-                        'candidate_plain': candidate_char,
-                    },
-                }
-            continue
-
-        # 같은 unknown cipher 문자가 한 단어 안에서 반복되면 같은 candidate_char여야 한다.
+            return {'valid': False, 'reason': 'unknown position already has mapping', 'new_mappings': [], 'details': {'position': pos, 'cipher_char': cipher_char, 'known_plain': mapping[cipher_char], 'candidate_plain': candidate_char}}
         if cipher_char in local_new_mapping:
             if local_new_mapping[cipher_char] != candidate_char:
-                return {
-                    'valid': False,
-                    'reason': 'local repeated unknown conflict',
-                    'new_mappings': [],
-                    'details': {
-                        'position': pos,
-                        'cipher_char': cipher_char,
-                        'first_plain': local_new_mapping[cipher_char],
-                        'candidate_plain': candidate_char,
-                    },
-                }
+                return {'valid': False, 'reason': 'local repeated unknown conflict', 'new_mappings': [], 'details': {'position': pos, 'cipher_char': cipher_char, 'first_plain': local_new_mapping[cipher_char], 'candidate_plain': candidate_char}}
         else:
             local_new_mapping[cipher_char] = candidate_char
-
-        # 이번 실험에서는 기본적으로 reverse mapping 충돌을 무시한다.
-        # check_reverse_mapping=True로 호출한 경우에만 기존 방식으로 막는다.
-        if check_reverse_mapping:
-            if candidate_char in reverse_mapping and reverse_mapping[candidate_char] != cipher_char:
-                return {
-                    'valid': False,
-                    'reason': 'reverse mapping conflict',
-                    'new_mappings': [],
-                    'details': {
-                        'position': pos,
-                        'candidate_plain': candidate_char,
-                        'existing_cipher': reverse_mapping[candidate_char],
-                        'new_cipher': cipher_char,
-                    },
-                }
-
-    new_mappings = list(local_new_mapping.items())
-
-    return {
-        'valid': True,
-        'reason': 'length match, fixed letters match, reverse mapping not checked',
-        'new_mappings': new_mappings,
-        'details': {
-            'expected_len': expected_len,
-            'candidate_len': candidate_len,
-            'fixed_checks': fixed_checks,
-            'check_reverse_mapping': check_reverse_mapping,
-        },
-    }
+        if candidate_char in reverse_mapping and reverse_mapping[candidate_char] != cipher_char:
+            return {'valid': False, 'reason': 'reverse mapping conflict', 'new_mappings': [], 'details': {'position': pos, 'candidate_plain': candidate_char, 'existing_cipher': reverse_mapping[candidate_char], 'new_cipher': cipher_char}}
+    for cipher_char, plain_char in local_new_mapping.items():
+        new_mappings.append((cipher_char, plain_char))
+    return {'valid': True, 'reason': 'length match, fixed letters match, reverse mapping consistent', 'new_mappings': new_mappings, 'details': {'expected_len': expected_len, 'candidate_len': candidate_len, 'fixed_checks': fixed_checks}}
 
 def classify_candidate_status(cipher_word, decoded_pattern, candidate, mapping):
     """
     candidate를 solution 출력용 한 줄 summary로 분류한다.
 
-    이번 실험 버전:
-        - length check
-        - fixed decoded letter check
-        - local repeated unknown check
-        - reverse mapping conflict는 기본적으로 보지 않는다.
+    출력 원칙:
+        - 실제 검사 순서처럼 보이게 한다.
+        - length mismatch는 바로 invalid.
+        - fixed mismatch는 length match 이후 첫 번째 mismatch만 보여준다.
+        - reverse mapping conflict는 length match, fixed letters match 이후 보여준다.
     """
     cipher_word = str(cipher_word).lower()
     decoded_pattern = str(decoded_pattern).lower()
     candidate = str(candidate).lower()
-
     expected_len = len(decoded_pattern)
     candidate_len = len(candidate)
-
     if candidate_len != expected_len:
-        return {
-            'valid': False,
-            'reason_key': 'length mismatch',
-            'summary': f'{candidate}: length mismatch, expected {expected_len} but got {candidate_len}; invalid',
-            'new_mappings': [],
-        }
-
-    fixed_checks, fixed_mismatches = get_fixed_position_checks(
-        decoded_pattern=decoded_pattern,
-        candidate=candidate,
-    )
-
+        return {'valid': False, 'reason_key': 'length mismatch', 'summary': f'{candidate}: length mismatch, expected {expected_len} but got {candidate_len}; invalid', 'new_mappings': []}
+    fixed_checks, fixed_mismatches = get_fixed_position_checks(decoded_pattern=decoded_pattern, candidate=candidate)
     if len(fixed_mismatches) > 0:
         first = fixed_mismatches[0]
-        return {
-            'valid': False,
-            'reason_key': 'fixed letters mismatch',
-            'summary': f"{candidate}: length match; fixed letters mismatch, position {first['position']} expected '{first['expected']}' but got '{first['actual']}'; invalid",
-            'new_mappings': [],
-        }
-
-    consistency = check_candidate_mapping_consistency(
-        cipher_word=cipher_word,
-        decoded_pattern=decoded_pattern,
-        candidate=candidate,
-        mapping=mapping,
-        check_reverse_mapping=False,
-    )
-
+        return {'valid': False, 'reason_key': 'fixed letters mismatch', 'summary': f"{candidate}: length match; fixed letters mismatch, position {first['position']} expected '{first['expected']}' but got '{first['actual']}'; invalid", 'new_mappings': []}
+    consistency = check_candidate_mapping_consistency(cipher_word=cipher_word, decoded_pattern=decoded_pattern, candidate=candidate, mapping=mapping)
     if consistency['valid']:
         new_mapping_text = ', '.join((f'{c}->{p}' for c, p in consistency['new_mappings']))
         if new_mapping_text == '':
             new_mapping_text = 'none'
-        return {
-            'valid': True,
-            'reason_key': 'valid',
-            'summary': f'{candidate}: length match; fixed letters match; reverse mapping not checked; new mappings = {new_mapping_text}; valid',
-            'new_mappings': consistency['new_mappings'],
-        }
-
+        return {'valid': True, 'reason_key': 'valid', 'summary': f'{candidate}: length match; fixed letters match; reverse mapping consistent; new mappings = {new_mapping_text}; valid', 'new_mappings': consistency['new_mappings']}
     reason = consistency['reason']
     details = consistency.get('details', {})
-
     if reason == 'known mapping conflict':
         summary = f"{candidate}: length match; fixed letters match; known mapping conflict at position {details['position']}, cipher '{details['cipher_char']}' already maps to '{details['known_plain']}' but candidate proposes '{details['candidate_plain']}'; invalid"
     elif reason == 'unknown position already has mapping':
@@ -1390,23 +1263,47 @@ def classify_candidate_status(cipher_word, decoded_pattern, candidate, mapping):
         summary = f"{candidate}: length match; fixed letters match; reverse mapping conflict at position {details['position']}, plain letter '{details['candidate_plain']}' is already produced by cipher '{details['existing_cipher']}'; invalid"
     else:
         summary = f'{candidate}: length match; fixed letters match; {reason}; invalid'
-
-    return {
-        'valid': False,
-        'reason_key': reason,
-        'summary': summary,
-        'new_mappings': [],
-    }
+    return {'valid': False, 'reason_key': reason, 'summary': summary, 'new_mappings': []}
 
 def get_consistent_vocab_candidates(cipher_word, decoded_pattern, vocab, mapping):
-    candidates = get_vocab_candidates(pattern=decoded_pattern, vocab=vocab)
-    consistent_candidates = []
-    for candidate in candidates:
-        consistency = check_candidate_mapping_consistency(cipher_word=cipher_word, decoded_pattern=decoded_pattern, candidate=candidate, mapping=mapping)
-        if consistency['valid']:
-            consistent_candidates.append(candidate)
-    return consistent_candidates
+    """
+    High-score reference candidate filter.
 
+    It follows tonghuikang/nemotron reasoners/cipher.py behavior:
+      1. same length only
+      2. same repeated-letter word pattern as the cipher word
+      3. fixed decoded letters must match
+      4. only forward cipher->plain consistency is checked here
+
+    Reverse/plain-target usage is not checked in this first filter; it is shown
+    during left-to-right scan as `untargeted` and then removed before final
+    selection, matching the reference reasoning flow.
+    """
+    cipher_word = str(cipher_word).lower()
+    decoded_pattern = str(decoded_pattern).lower()
+    target_len = len(decoded_pattern)
+    target_pattern = cipher_word_pattern(cipher_word)
+    candidates = []
+    for candidate in sorted(vocab):
+        candidate = str(candidate).lower()
+        if len(candidate) != target_len:
+            continue
+        if cipher_word_pattern(candidate) != target_pattern:
+            continue
+        ok = True
+        for pos, decoded_char in enumerate(decoded_pattern):
+            if decoded_char != '?' and decoded_char != candidate[pos]:
+                ok = False
+                break
+        if not ok:
+            continue
+        for c_char, p_char in zip(cipher_word, candidate):
+            if c_char in mapping and mapping[c_char] != p_char:
+                ok = False
+                break
+        if ok:
+            candidates.append(candidate)
+    return candidates
 
 # ===== Extracted from notebook cell 52 =====
 def cipher_dash_chars(text):
@@ -1573,90 +1470,53 @@ def format_fixed_letters_line(decoded_pattern):
         return 'Fixed letters are none.'
     return 'Fixed letters are ' + ', '.join(fixed_items) + '.'
 
-def format_left_to_right_candidate_detail(
-    cipher_word,
-    decoded_pattern,
-    candidate,
-    mapping,
-    check_reverse_mapping=False,
-):
+def format_left_to_right_candidate_detail(cipher_word, decoded_pattern, candidate, mapping):
     """
-    Candidate display detail using left-to-right checking.
+    High-score reference style candidate scan detail.
 
-    이번 실험 버전의 핵심:
-        - reverse mapping/plain->cipher 충돌은 기본적으로 표시하지도, 탈락시키지도 않는다.
-        - 같은 unknown cipher 문자가 한 candidate 단어 안에서 반복되면 local mapping으로 관리한다.
-        - 이미 local new mapping이 만들어진 같은 cipher 문자는 반복해서 "new"처럼 처리하지 않고
-          repeated-local match로 표시한다.
-
-    Args:
-        check_reverse_mapping:
-            기본 False. True이면 기존 방식처럼 이미 사용된 plain letter 충돌을 unmapped mismatch로 표시한다.
+    This intentionally uses the wording used by the reference implementation:
+      - known/fixed match:      `match`
+      - known/fixed mismatch:   `unmatchable`
+      - unknown new target:     `matchable`
+      - unknown target already produced by another cipher char: `untargeted`
+      - repeated local unknown with same proposed plain char: `consistent`
+      - repeated local unknown with different proposed plain char: `contradiction`
     """
     cipher_word = str(cipher_word).lower()
     decoded_pattern = str(decoded_pattern).lower()
     candidate = str(candidate).lower()
-
-    reverse_mapping = build_reverse_mapping(mapping) if check_reverse_mapping else {}
-    local_new_mapping = {}
-    parts = []
-
-    for pos, (cipher_char, decoded_char, candidate_char) in enumerate(
-        zip(cipher_word, decoded_pattern, candidate)
-    ):
-        # 이미 고정된 자리
-        if decoded_char != '?':
-            if decoded_char == candidate_char:
-                parts.append(f'{pos}〖{candidate_char}〗〖{decoded_char}〗fixed match')
-                continue
-            return {
-                'valid': False,
-                'detail': f'{pos}〖{decoded_char}〗〖{candidate_char}〗fixed mismatch',
-                'reason': 'fixed mismatch',
-            }
-
-        # '?' 자리지만 현재 mapping에 이미 있으면 known mapping으로 비교한다.
+    comparisons = []
+    mismatch_found = False
+    tentative = {}
+    mapped_plain = set(mapping.values())
+    for pos, (candidate_char, cipher_char) in enumerate(zip(candidate, cipher_word)):
         if cipher_char in mapping:
-            known_plain = mapping[cipher_char]
-            if known_plain == candidate_char:
-                parts.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗mapped match')
-                continue
-            return {
-                'valid': False,
-                'detail': f'{pos}〖{candidate_char}〗〖({cipher_char})〗mapped mismatch, expected {known_plain}',
-                'reason': 'mapped mismatch',
-            }
-
-        # 같은 unknown cipher 문자가 현재 단어 안에서 이미 새로 매핑되었는지 확인한다.
-        if cipher_char in local_new_mapping:
-            expected_plain = local_new_mapping[cipher_char]
-            if expected_plain == candidate_char:
-                parts.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗repeated-local match')
-                continue
-            return {
-                'valid': False,
-                'detail': f'{pos}〖{candidate_char}〗〖({cipher_char})〗repeated-local mismatch, expected {expected_plain}',
-                'reason': 'local repeated unknown conflict',
-            }
-
-        # 이번 실험에서는 기본적으로 reverse mapping을 확인하지 않는다.
-        if check_reverse_mapping:
-            if candidate_char in reverse_mapping and reverse_mapping[candidate_char] != cipher_char:
-                return {
-                    'valid': False,
-                    'detail': f'{pos}〖{candidate_char}〗〖({cipher_char})〗 unmapped mismatch',
-                    'reason': 'unmapped mismatch',
-                }
-
-        local_new_mapping[cipher_char] = candidate_char
-        parts.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗unmapped match')
-
-    parts.append(f'{len(candidate)} all match')
-    return {
-        'valid': True,
-        'detail': ' , '.join(parts),
-        'reason': 'valid',
-    }
+            plain_char = mapping[cipher_char]
+            if candidate_char == plain_char:
+                comparisons.append(f'{pos}〖{candidate_char}〗〖{plain_char}〗match')
+            else:
+                comparisons.append(f'{pos}〖{plain_char}〗〖{candidate_char}〗unmatchable')
+                mismatch_found = True
+                break
+        else:
+            if cipher_char in tentative:
+                if tentative[cipher_char] == candidate_char:
+                    comparisons.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗consistent')
+                else:
+                    comparisons.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗contradiction')
+                    mismatch_found = True
+                    break
+            else:
+                if candidate_char in mapped_plain:
+                    comparisons.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗untargeted')
+                    mismatch_found = True
+                    break
+                tentative[cipher_char] = candidate_char
+                comparisons.append(f'{pos}〖{candidate_char}〗〖({cipher_char})〗matchable')
+    detail = ', '.join(comparisons)
+    if not mismatch_found:
+        detail += f', {len(cipher_word)} all match'
+    return {'valid': not mismatch_found, 'detail': detail, 'reason': 'valid' if not mismatch_found else 'mismatch'}
 
 def format_reverse_mapping_conflict_detail(cipher_word, decoded_pattern, candidate, mapping):
     """
@@ -1882,7 +1742,7 @@ def decode_cipher_query_highscore_style(query, mapping):
         lines.append('Unmapped target letters')
         lines.append('\n'.join(unmapped_target_letters))
         lines.append('')
-        lines.append('Let me find the best matching vocabulary words:')
+        lines.append('Let me find the best matching wonderland words:')
     else:
         lines.append('Iterating over the unknown letters to see if they are in the question: no unknown letters')
     return (decoded_words, unknown_word_records, sorted(all_unknown_chars), '\n'.join(lines))
@@ -1891,55 +1751,58 @@ def collect_cipher_candidate_display_words(cipher_word, decoded_pattern, mapping
     """
     Build candidate display list from cipher_answer_vocab or current display vocab.
 
-    기존 코드는 display vocab 전체를 길이 mismatch까지 모두 출력했다.
-    그러면 unknown_count_3/4 케이스에서 solution이 과하게 길어지고,
-    실제 선택과 무관한 후보가 너무 많이 반복된다.
-
-    이번 실험 버전:
-        - 같은 길이 단어만 출력한다.
-        - selected_word가 vocab 밖에서 나온 경우에는 display list에 추가한다.
-        - 후보 선택 자체는 get_consistent_vocab_candidates() 결과를 사용한다.
+    Core rule:
+        - Keep the user's current candidate pool behavior.
+        - If cipher_answer_vocab exists, use it.
+        - Otherwise, use cipher_display_vocab.
     """
     if 'cipher_answer_vocab' in globals():
         base_vocab = cipher_answer_vocab
     else:
         base_vocab = cipher_display_vocab
-
-    target_len = len(str(cipher_word))
-    candidate_pool = sorted({
-        str(word).lower()
-        for word in base_vocab
-        if re.fullmatch('[a-z]+', str(word).lower())
-        and len(str(word).lower()) == target_len
-    })
-
-    if selected_word is not None and selected_word != decoded_pattern:
+    candidate_pool = sorted({str(word).lower() for word in base_vocab if re.fullmatch('[a-z]+', str(word).lower())})
+    if selected_word is not None and selected_word != decoded_pattern and re.fullmatch('[a-z]+', str(selected_word).lower()):
         selected_word = str(selected_word).lower()
-        if re.fullmatch('[a-z]+', selected_word) and len(selected_word) == target_len:
-            if selected_word not in candidate_pool:
-                candidate_pool.append(selected_word)
-                candidate_pool = sorted(set(candidate_pool))
-
+        if selected_word not in candidate_pool:
+            candidate_pool.append(selected_word)
+            candidate_pool = sorted(set(candidate_pool))
     return candidate_pool
 
-def build_candidate_word_scan_highscore_style(cipher_word, decoded_pattern, mapping, valid_candidates, selected_word):
+def build_candidate_word_scan_highscore_style(
+    cipher_word,
+    decoded_pattern,
+    mapping,
+    valid_candidates,
+    selected_word,
+    initial_mapping=None,
+    orig_display_dashed=None,
+):
     """
-    Show candidate scan using left-to-right candidate checking.
+    High-score reference style candidate scan.
 
-    이번 실험 버전:
-        - 같은 길이 vocab만 scan한다.
-        - reverse mapping은 기본적으로 확인하지 않는다.
-        - 같은 unknown cipher 문자가 candidate 내부에서 반복되면 local mapping으로 한 번만 새 매핑으로 본다.
+    It prints the original partially decoded word, accumulated new mappings,
+    current partially decoded word, then scans every display-vocab word with
+    the reference wording (`length`, `match`, `matchable`, `untargeted`, ...).
     """
     lines = []
     display_tokens = format_unknown_display_tokens(cipher_word=cipher_word, mapping=mapping)
     display_dashed = cipher_dash_tokens(display_tokens)
-
+    if orig_display_dashed is None:
+        orig_display_dashed = display_dashed
     lines.append('')
+    lines.append(f'〖{orig_display_dashed}〗')
+    if initial_mapping is not None:
+        accumulated_new = [
+            f'〖({c_char})〗->〖{mapping[c_char]}〗'
+            for c_char in sorted(mapping)
+            if c_char not in initial_mapping
+        ]
+        if accumulated_new:
+            lines.append(f"New mappings: {', '.join(accumulated_new)}")
+        else:
+            lines.append('New mappings: none')
     lines.append(f'〖{display_dashed}〗')
     lines.append(f'The length of the word is {len(cipher_word)}.')
-    lines.append(format_fixed_letters_line(decoded_pattern))
-    lines.append('Candidate scan policy: same-length words only; reverse mapping is not checked.')
 
     displayed_words = collect_cipher_candidate_display_words(
         cipher_word=cipher_word,
@@ -1948,65 +1811,40 @@ def build_candidate_word_scan_highscore_style(cipher_word, decoded_pattern, mapp
         valid_candidates=valid_candidates,
         selected_word=selected_word,
     )
-
     if len(displayed_words) == 0:
-        lines.append('No vocabulary candidates were found.')
+        lines.append('No wonderland candidates were found.')
         lines.append('Best match: none')
         return '\n'.join(lines)
-
-    valid_set = set(str(x).lower() for x in valid_candidates)
 
     for candidate in displayed_words:
         candidate = str(candidate).lower()
         candidate_dashed = cipher_dash_chars(candidate)
         candidate_len = len(candidate)
-
-        # displayed_words는 같은 길이만 반환하지만 안전하게 둔다.
         if candidate_len != len(cipher_word):
             lines.append(f'{candidate} {candidate_len} length')
             continue
-
         left_to_right_result = format_left_to_right_candidate_detail(
             cipher_word=cipher_word,
             decoded_pattern=decoded_pattern,
             candidate=candidate,
             mapping=mapping,
-            check_reverse_mapping=False,
         )
-
-        if candidate in valid_set:
-            valid_tag = 'valid-candidate'
-        else:
-            valid_tag = 'scan-only'
-
-        lines.append(
-            f"{candidate} {candidate_len} 〖{candidate_dashed}〗, "
-            f"{left_to_right_result['detail']} [{valid_tag}]"
-        )
-
+        lines.append(f"{candidate} {candidate_len} 〖{candidate_dashed}〗, {left_to_right_result['detail']}")
     if selected_word is None or selected_word == decoded_pattern:
         lines.append('Best match: none')
     else:
         lines.append(f'Best match: 〖{selected_word}〗')
-
     return '\n'.join(lines)
 
 def build_selected_word_update_highscore_style(cipher_word, selected_word, mapping):
     """
-    Build log for applying selected_word to the current mapping.
-
-    수정 포인트:
-        - 같은 cipher character가 selected_word 안에서 반복되면 new mapping을 한 번만 기록한다.
-        - 첫 번째 출현에서 새 mapping을 만들고, 다음 출현은 repeated-local same으로 표시한다.
-        - reverse mapping은 확인하지 않는다.
+    High-score reference style mapping update for the selected word.
     """
     lines = []
-    new_pairs = []
-    local_new_mapping = {}
+    new_mappings = []
+    pending_mappings = []
     current_display_tokens = format_unknown_display_tokens(cipher_word=cipher_word, mapping=mapping)
-
     lines.append(f'〖{cipher_dash_tokens(current_display_tokens)}〗->〖{cipher_dash_chars(selected_word)}〗')
-
     for c_char, p_char in zip(cipher_word, selected_word):
         if c_char in mapping:
             known_plain = mapping[c_char]
@@ -2014,54 +1852,35 @@ def build_selected_word_update_highscore_style(cipher_word, selected_word, mappi
                 lines.append(f'〖{known_plain}〗->〖{p_char}〗same')
             else:
                 lines.append(f'〖{known_plain}〗->〖{p_char}〗conflict')
-            continue
+        else:
+            lines.append(f'〖({c_char})〗->〖{p_char}〗 new')
+            if (c_char, p_char) not in pending_mappings:
+                pending_mappings.append((c_char, p_char))
+                new_mappings.append(f'〖({c_char})〗->〖{p_char}〗')
+    if new_mappings:
+        lines.append('Added mappings')
+        lines.append('\n'.join(new_mappings))
+    return ('\n'.join(lines), pending_mappings)
 
-        if c_char in local_new_mapping:
-            local_plain = local_new_mapping[c_char]
-            if local_plain == p_char:
-                lines.append(f'〖({c_char})〗->〖{p_char}〗repeated-local same')
-            else:
-                lines.append(f'〖({c_char})〗->〖{p_char}〗repeated-local conflict, expected 〖{local_plain}〗')
-            continue
-
-        local_new_mapping[c_char] = p_char
-        new_pairs.append((c_char, p_char))
-        lines.append(f'〖({c_char})〗->〖{p_char}〗 new')
-
-    if len(new_pairs) > 0:
-        lines.append('New mappings')
-        for c_char, p_char in new_pairs:
-            lines.append(f'〖({c_char})〗->〖{p_char}〗')
-
-    return ('\n'.join(lines), new_pairs)
-
+# ===== Extracted from notebook cell 53 =====
 def solve_cipher(examples, query):
     """
-    Cipher solver.
+    Cipher solver using the high-score reference-style reasoning flow.
 
-    이번 실험 버전의 목표:
-        - 후보 단어 선택 시 reverse mapping/plain->cipher 충돌을 확인하지 않는다.
-        - fixed letter check는 유지한다.
-        - 같은 cipher 문자가 한 candidate 단어 안에서 반복되면 같은 plain 문자로만 허용한다.
-        - mapping update 시 같은 cipher 문자의 반복 new mapping 로그를 중복 생성하지 않는다.
-        - unknown_count_3, unknown_count_4도 동일한 정책으로 처리한다.
+    This version intentionally follows tonghuikang/nemotron's cipher reasoning
+    text more closely than the previous no-reverse variant:
+      - word-pattern candidate filtering
+      - wonderland-style candidate scan wording
+      - `untargeted` handling for already-mapped plain letters
+      - deterministic first remaining valid candidate
     """
-    base_rule_name = 'char_substitution_with_wonderland_vocab_scan_no_reverse'
-    solver_name = 'cipher_solver_answer_vocab_wonderland_no_reverse'
+    base_rule_name = 'char_substitution_with_wonderland_vocab_scan'
+    solver_name = 'cipher_solver_answer_vocab_wonderland_highscore_style'
     rule_name = base_rule_name
-
     try:
         if query is None or examples is None or len(examples) == 0:
-            return make_solver_result(
-                solved=False,
-                answer=None,
-                solution='Task: cipher\nstatus=unsolved\nreason=query_or_examples_missing',
-                rule_name=rule_name,
-                solver_name=solver_name,
-            )
-
+            return make_solver_result(solved=False, answer=None, solution='Task: cipher\nstatus=unsolved\nreason=query_or_examples_missing', rule_name=rule_name, solver_name=solver_name)
         examples = safe_parse_examples_if_string(examples)
-
         normalized_examples = []
         for ex in examples:
             if isinstance(ex, dict):
@@ -2072,61 +1891,29 @@ def solve_cipher(examples, query):
             normalized_examples.append((str(cipher_text), str(plain_text)))
 
         query_text = str(query)
-        query_words = query_text.split()
-
         solution_parts = []
-        solution_parts.append(
-            build_cipher_highscore_style_header(
-                examples=normalized_examples,
-                query=query_text,
-            )
-        )
-
-        mapping, mapping_log = build_cipher_mapping_highscore_style(
-            examples=normalized_examples,
-        )
+        solution_parts.append(build_cipher_highscore_style_header(examples=normalized_examples, query=query_text))
+        mapping, mapping_log = build_cipher_mapping_highscore_style(examples=normalized_examples)
         solution_parts.append(mapping_log)
-
         if len(mapping) == 0:
-            return make_solver_result(
-                solved=False,
-                answer=None,
-                solution='Task: cipher\nstatus=unsolved\nreason=empty_mapping',
-                rule_name=rule_name,
-                solver_name=solver_name,
-            )
+            return make_solver_result(solved=False, answer=None, solution='Task: cipher\nstatus=unsolved\nreason=empty_mapping', rule_name=rule_name, solver_name=solver_name)
 
-        decoded_words, unknown_word_records, query_unknown_chars, decode_log = decode_cipher_query_highscore_style(
-            query=query_text,
-            mapping=mapping,
-        )
+        decoded_words, unknown_word_records, query_unknown_chars, decode_log = decode_cipher_query_highscore_style(query=query_text, mapping=mapping)
         solution_parts.append(decode_log)
-
         unknown_count = len(query_unknown_chars)
         rule_name = f'{base_rule_name}__unknown_count_{unknown_count}'
-
-        # 초기 unknown_word_records는 처음 decode 시점 기준이다.
-        # mapping update 후 같은 word가 이미 완전히 풀렸을 수 있으므로,
-        # 각 record 처리 직전에 반드시 현재 mapping으로 다시 decode한다.
-        processed_word_indices = set()
+        query_words = query_text.split()
+        initial_mapping = dict(mapping)
 
         for record in unknown_word_records:
             word_idx = record['word_idx']
             cipher_word = record['cipher_word']
-
-            if word_idx in processed_word_indices:
-                continue
-
-            current_decoded_pattern, _ = decode_query_word_with_display(
-                word=cipher_word,
-                mapping=mapping,
-            )
-
+            current_decoded_pattern, _ = decode_query_word_with_display(word=cipher_word, mapping=mapping)
             if '?' not in current_decoded_pattern:
                 decoded_words[word_idx] = current_decoded_pattern
-                processed_word_indices.add(word_idx)
                 continue
 
+            # Reference first-pass candidate list: pattern + fixed letters + forward consistency.
             valid_candidates = get_consistent_vocab_candidates(
                 cipher_word=cipher_word,
                 decoded_pattern=current_decoded_pattern,
@@ -2134,9 +1921,22 @@ def solve_cipher(examples, query):
                 mapping=mapping,
             )
 
+            # Reference final selection: remove candidates that map an unknown cipher
+            # character to an already-used target/plain letter.
+            unmapped_plain = {c for c in 'abcdefghijklmnopqrstuvwxyz' if c not in set(mapping.values())}
+            remaining_candidates = []
+            for candidate in sorted(valid_candidates):
+                bad = False
+                for c_char, p_char in zip(cipher_word, candidate):
+                    if c_char not in mapping and p_char not in unmapped_plain:
+                        bad = True
+                        break
+                if not bad:
+                    remaining_candidates.append(candidate)
+
             selected_word = choose_best_candidate(
                 pattern=current_decoded_pattern,
-                candidates=valid_candidates,
+                candidates=remaining_candidates,
                 sentence_words=None,
                 word_idx=None,
             )
@@ -2147,12 +1947,13 @@ def solve_cipher(examples, query):
                 mapping=mapping,
                 valid_candidates=valid_candidates,
                 selected_word=selected_word,
+                initial_mapping=initial_mapping,
+                orig_display_dashed=record.get('display_dashed'),
             )
             solution_parts.append(candidate_scan_log)
 
             if selected_word == current_decoded_pattern:
                 decoded_words[word_idx] = selected_word
-                processed_word_indices.add(word_idx)
                 continue
 
             selected_update_log, new_pairs = build_selected_word_update_highscore_style(
@@ -2161,60 +1962,23 @@ def solve_cipher(examples, query):
                 mapping=mapping,
             )
             solution_parts.append(selected_update_log)
-
-            previous_mapping = dict(mapping)
-
-            # new_pairs는 중복 제거되어 있다.
             for c_char, p_char in new_pairs:
-                if c_char not in mapping:
-                    mapping[c_char] = p_char
-
-            solution_parts.append(
-                build_redecode_after_mapping_update_log(
-                    query_text=query_text,
-                    query_words=query_words,
-                    mapping=mapping,
-                    previous_mapping=previous_mapping,
-                )
-            )
-            solution_parts.append(
-                build_unknown_letters_after_mapping_update_log(
-                    query_words=query_words,
-                    mapping=mapping,
-                )
-            )
-
+                mapping[c_char] = p_char
             decoded_words[word_idx] = selected_word
-            processed_word_indices.add(word_idx)
 
-        answer = decode_sentence_with_mapping(
-            query_words=query_words,
-            mapping=mapping,
-        )
-
-        solution_parts.append(
-            f'I will now return the answer in \\boxed{{}}\n'
-            f'The answer in \\boxed{{–}} is \\boxed{{{answer}}}'
-        )
-
+        answer = decode_sentence_with_mapping(query_words=query_words, mapping=mapping)
+        solution_parts.append(f'I will now return the answer in \\boxed{{}}\nThe answer in \\boxed{{–}} is \\boxed{{{answer}}}')
         solution = '\n\n'.join(solution_parts)
-
-        return make_solver_result(
-            solved=True,
-            answer=answer,
-            solution=solution,
-            rule_name=rule_name,
-            solver_name=solver_name,
-        )
-
+        return make_solver_result(solved=True, answer=answer, solution=solution, rule_name=rule_name, solver_name=solver_name)
     except Exception as e:
-        return make_solver_result(
-            solved=False,
-            answer=None,
-            solution=f'Task: cipher\nstatus=solver_exception\nerror={type(e).__name__}: {e}',
-            rule_name='cipher_solver_exception',
-            solver_name=solver_name,
-        )
+        return make_solver_result(solved=False, answer=None, solution=f'Task: cipher\nstatus=solver_exception\nerror={type(e).__name__}: {e}', rule_name='cipher_solver_exception', solver_name=solver_name)
+
+# ===== Extracted from notebook cell 64 =====
+from collections import defaultdict
+
+from dataclasses import dataclass
+
+_NUMERIC_EXPR_RE = re.compile('^(\\d+)(\\D)(\\d+)$')
 
 def parse_numeric_symbol_expr(expr):
     """
@@ -3822,7 +3586,7 @@ COMMON_SYSTEM_PREFIX = 'You analyze the pattern of the quiz provided by the user
 
 BIT_MANIPULATION_STRATEGY = '\n\nFor bit manipulation problems, use this strategy:\n1. Check the bitsum of every input/output example.\n2. Classify the bitsum pattern as preserved, decreased, increased, or mixed.\n3. Test simple whole-byte transformations such as rotations, shifts, reverse, and NOT-after-transform.\n4. If no whole-byte rule matches all examples, build input/output bit columns by reading each bit position vertically.\n5. Search exact Boolean relations for each output column using Constant, Identity, NOT, AND, OR, XOR, AND-NOT, OR-NOT, and XOR-NOT.\n6. Prefer repeated chain patterns across adjacent output bits.\n7. Fill uncovered output positions only with relations that match the examples exactly.\n8. Apply the selected output-bit rules to the query and concatenate the output bits.'
 
-CIPHER_STRATEGY = "\n\nFor character substitution cipher problems, use this strategy:\n1. Align each cipher example with its plain-text output while ignoring spaces.\n2. Build the cipher-to-plain character mapping from the examples.\n3. Decode the query using the known mapping and mark unknown characters with '?'.\n4. For unresolved words, scan same-length vocabulary candidates.\n5. Reject candidates by length mismatch, fixed-letter mismatch, known cipher mapping conflict, or repeated-unknown local conflict.\n6. Do not reject candidates only because another cipher character already maps to the same plain letter.\n7. Select deterministic valid candidates, update the mapping, re-decode the query, and produce the final plain-text sentence."
+CIPHER_STRATEGY = "\n\nFor character substitution cipher problems, use this strategy:\n1. Align each cipher example with its plain-text output while ignoring spaces.\n2. Build the cipher-to-plain character mapping from the examples.\n3. Build the reverse plain-to-cipher mapping to keep the substitution one-to-one.\n4. Decode the query using the known mapping and mark unknown characters with '?'.\n5. For unresolved words, scan vocabulary candidates.\n6. Reject candidates by length mismatch, fixed-letter mismatch, or reverse mapping conflict.\n7. Select only candidates that pass all consistency checks.\n8. Update the mapping with selected candidates, re-decode the query, and produce the final plain-text sentence."
 
 FORMULA_BASED_STRATEGY = "\n\nFor formula-based falling-distance problems, use this strategy:\n1. Treat the falling-distance rule as d = k * t^2, where k is the hidden proportional constant.\n2. For each example, compute t^2 using explicit multiplication steps.\n3. For each example, compute k = d / t^2 and show the division calculation trace.\n4. Convert each example's k into a 3-decimal template value.\n5. Collect all k values, sort them, and select the median k.\n6. Apply the median k to the query using d = median_k * query_t^2.\n7. Show the query t^2 calculation, the multiplication by median k, and the running partial sums.\n8. Use the calculated prediction as the final output and preserve the exact generated numeric format."
 

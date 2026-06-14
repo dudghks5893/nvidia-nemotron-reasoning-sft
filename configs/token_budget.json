@@ -1,9 +1,15 @@
 {
-  "bit_manipulation": 0.27,
-  "formula_based": 0.19,
-  "cipher": 0.17,
-  "unit_conversion": 0.14,
-  "numeric_symbol": 0.11,
-  "roman_numeral": 0.09,
-  "pure_symbol": 0.03
+  "bit_manipulation": 0.28,
+  "cipher": 0.18,
+  "unit_conversion": 0.13,
+  "gravity": 0.13,
+  "formula_based": 0.13,
+  "roman_numeral": 0.08,
+  "numeral": 0.08,
+  "equation_numeric_deduce": 0.08,
+  "equation_numeric_guess": 0.03,
+  "numeric_symbol": 0.08,
+  "cryptarithm_deduce": 0.07,
+  "cryptarithm_guess": 0.02,
+  "pure_symbol": 0.07
 }

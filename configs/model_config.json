@@ -1,7 +1,0 @@
-{
-  "model_name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
-  "cache_dir": ".cache/huggingface",
-  "trust_remote_code": true,
-  "use_fast": true,
-  "max_seq_len": 8192
-}
